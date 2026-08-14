@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="695" height="446" viewBox="0 0 695 446" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="695" height="446" rx="8" fill="#0d1117" stroke="#30363d"/>
+<rect width="695" height="34" rx="8" fill="#161b22"/>
+<rect y="26" width="695" height="8" fill="#161b22"/>
+<circle cx="18" cy="17" r="5" fill="#ff5f56"/>
+<circle cx="36" cy="17" r="5" fill="#ffbd2e"/>
+<circle cx="54" cy="17" r="5" fill="#27c93f"/>
+<text x="72" y="22" fill="#8b949e">killed a live instance, measured what users saw</text>
+<text x="16" y="54" fill="#8b949e" xml:space="preserve"># killed a LIVE instance in us-east-1a, polled the load balancer every 10s</text>
+<text x="16" y="94" fill="#c9d1d9" xml:space="preserve">  t+010s  instance i-0c0e63146fee0e3a2 | az us-east-1a</text>
+<text x="16" y="114" fill="#c9d1d9" xml:space="preserve">  t+020s  instance i-0dcb1909f0faab84a | az us-east-1b</text>
+<text x="16" y="134" fill="#c9d1d9" xml:space="preserve">  t+030s  DOWN</text>
+<text x="16" y="154" fill="#c9d1d9" xml:space="preserve">  t+040s  instance i-0dcb1909f0faab84a | az us-east-1b</text>
+<text x="16" y="174" fill="#c9d1d9" xml:space="preserve">  t+050s  instance i-0dcb1909f0faab84a | az us-east-1b</text>
+<text x="16" y="194" fill="#c9d1d9" xml:space="preserve">  t+060s  instance i-0a1f1afe6424640da | az us-east-1a   &lt;- replacement serving</text>
+<text x="16" y="214" fill="#c9d1d9" xml:space="preserve">  t+070s  instance i-0a1f1afe6424640da | az us-east-1a</text>
+<text x="16" y="234" fill="#c9d1d9" xml:space="preserve">  t+080s  instance i-0dcb1909f0faab84a | az us-east-1b</text>
+<text x="16" y="274" fill="#f85149" font-weight="600" xml:space="preserve">  requests served: 11   failed: 1</text>
+<text x="16" y="314" fill="#8b949e" xml:space="preserve"># the ONE failure is the point. health check runs every 15s and needs 3</text>
+<text x="16" y="334" fill="#8b949e" xml:space="preserve"># consecutive fails, so up to 45s of traffic still goes to a dead target.</text>
+<text x="16" y="354" fill="#8b949e" xml:space="preserve"># that window is arithmetic, not a bug. no setting removes it.</text>
+<text x="16" y="394" fill="#8b949e" xml:space="preserve"># HA means automatic recovery without a human.</text>
+<text x="16" y="414" fill="#8b949e" xml:space="preserve"># it does NOT mean zero dropped requests.</text>
+</svg>

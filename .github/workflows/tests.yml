@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  chaos-logic:
+    name: Chaos target selection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest boto3
+      - run: python -m pytest tests/ -v
+
+      - name: canary, must refuse to kill an already dead instance
+        # This is the bug that made the first chaos run pass falsely. It picked
+        # a stale Terminating entry, killed something already gone, and printed
+        # exactly what a successful test prints.
+        run: |
+          python - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("c", "scripts/chaos.py")
+          c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+
+          stale = [{"InstanceId":"i-dead","LifecycleState":"Terminating","HealthStatus":"Healthy","AvailabilityZone":"us-east-1a"}]
+          assert c.pick_victim(stale) is None, "FAILED: would have killed a terminating instance"
+
+          mixed = stale + [{"InstanceId":"i-live","LifecycleState":"InService","HealthStatus":"Healthy","AvailabilityZone":"us-east-1a"}]
+          assert c.pick_victim(mixed) == "i-live", "FAILED: did not prefer the live instance"
+
+          assert c.verdict(0,12)["pass"] is False, "FAILED: total outage must not pass"
+          print("canary passed: refuses dead targets, fails on total outage")
+          PY
+
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      # -backend=false because the real backend is an S3 bucket in a private
+      # account. Validation does not need state, only the config.
+      - run: terraform -chdir=terraform init -backend=false
+      - run: terraform -chdir=terraform validate
+      - run: terraform -chdir=terraform fmt -check -recursive
