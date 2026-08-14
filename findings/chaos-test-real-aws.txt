@@ -1,0 +1,70 @@
+Availability proven by breaking it, on real AWS
+Date: 2026-08-14
+Cost: a few cents. ALB and two t3.micro instances for under an hour.
+======================================================================
+
+THE PLATFORM
+
+  Application load balancer across two availability zones, autoscaling group
+  with two instances in private subnets, health checks driving replacement.
+  Terraform state in S3 with a DynamoDB lock.
+
+  Serving normally, alternating across both AZs:
+
+    lab13 ok | instance i-0dcb1909f0faab84a | az us-east-1b
+    lab13 ok | instance i-0c0e63146fee0e3a2 | az us-east-1a
+
+THE CHAOS TEST
+
+  Terminated a live instance in us-east-1a and polled every ten seconds.
+
+    t+010s  instance i-0c0e63146fee0e3a2 | az us-east-1a
+    t+020s  instance i-0dcb1909f0faab84a | az us-east-1b
+    t+030s  DOWN
+    t+040s  instance i-0dcb1909f0faab84a | az us-east-1b
+    t+050s  instance i-0dcb1909f0faab84a | az us-east-1b
+    t+060s  instance i-0a1f1afe6424640da | az us-east-1a   <- replacement
+    t+070s  instance i-0a1f1afe6424640da | az us-east-1a
+    t+080s  instance i-0dcb1909f0faab84a | az us-east-1b
+    ...
+    requests served: 11   failed: 1
+
+  Three things happened, in order. Traffic shifted to the surviving AZ. The
+  autoscaling group noticed capacity was below desired and launched a
+  replacement. The replacement passed its health check and started serving,
+  about sixty seconds after the kill.
+
+THE ONE FAILED REQUEST IS THE POINT
+
+  It would be easy to report "the site stayed up" and move on. It did not,
+  entirely. One request in twelve failed.
+
+  That gap is not a bug, it is arithmetic. The health check runs every 15
+  seconds and needs 3 consecutive failures before the load balancer stops
+  sending traffic to a target. So there is a window of up to 45 seconds where
+  the balancer still forwards to an instance that is already gone.
+
+  Tightening the interval shrinks the window and increases the chance a
+  briefly slow instance gets evicted for no reason. There is no setting that
+  removes it. Closing it properly needs the client to retry, or connection
+  draining plus a deregistration hook so the instance leaves the pool before
+  it dies rather than after.
+
+  "Highly available" means automatic recovery without a human. It does not
+  mean zero dropped requests, and anyone claiming a two AZ setup gives them
+  zero downtime has not measured it.
+
+A FALSE POSITIVE I ALMOST SHIPPED
+
+  The first run of this test queried the autoscaling group for Instances[0]
+  and terminated it. Every request succeeded and it looked like a clean pass.
+
+  That instance was already terminated. It was a stale entry from an earlier
+  replacement, so the test killed something dead and proved nothing, while
+  producing exactly the output a successful test produces.
+
+  Caught it by checking LifecycleState rather than trusting the list. The
+  second run targeted an instance confirmed InService, and that is the run
+  above, which is why it has a failure in it.
+
+  A chaos test that cannot fail is not a chaos test.
