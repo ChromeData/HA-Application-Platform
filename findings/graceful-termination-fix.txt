@@ -1,0 +1,79 @@
+Closing the failover gap, and where it stays open
+Date: 2026-08-14
+Issue: #1
+Cost: a few cents. ALB and two t3.micro for under an hour, destroyed after.
+======================================================================
+
+THE PROBLEM, MEASURED EARLIER
+
+  Chaos test on the original build: 11 requests served, 1 dropped.
+
+  Cause was ordering. The instance dies, and the load balancer finds out
+  afterwards through health checks. Interval 15s times unhealthy_threshold 3
+  is up to 45 seconds of traffic sent to something already gone, and no
+  combination of those two settings removes it.
+
+THE FIX
+
+  An autoscaling lifecycle hook on EC2_INSTANCE_TERMINATING. The instance
+  moves to Terminating:Wait instead of dying, which triggers deregistration
+  from the target group. The 30 second deregistration_delay then drains
+  in-flight requests. Only after that does the instance actually terminate.
+
+  It inverts the order: the instance leaves the pool BEFORE it stops serving,
+  instead of the balancer discovering the loss afterwards.
+
+    heartbeat_timeout = 120   (room for a 30s drain to finish)
+    default_result    = CONTINUE
+
+  CONTINUE matters. A hook that fails for any reason still lets the instance
+  terminate rather than wedging the autoscaling group, which is the failure
+  mode people hit the first time they add one.
+
+RESULT, GRACEFUL TERMINATION
+
+  terminate-instance-in-auto-scaling-group, which goes through the hook:
+
+    t+010s  instance i-0e1518a573c3417de | az us-east-1b
+    t+020s  instance i-0e1518a573c3417de | az us-east-1b
+    ...
+    t+050s  instance i-0f7b70440366ad2f7 | az us-east-1a   <- replacement
+    ...
+    t+140s  instance i-0e1518a573c3417de | az us-east-1b
+
+    served: 14   failed: 0
+
+  Zero dropped requests. The gap is closed for planned termination, which
+  covers scale-in, deploys, and instance refresh. That is the large majority
+  of terminations in a real system.
+
+RESULT, SUDDEN FAILURE, WHICH IS STILL BROKEN
+
+  ec2 terminate-instances directly, bypassing the hook entirely. This is what
+  a kernel panic or dead hardware looks like: no notice, nothing gets to run.
+
+    t+010s  instance i-0f7b70440366ad2f7 | az us-east-1a
+    t+020s  DOWN
+    t+030s  instance i-0f7b70440366ad2f7 | az us-east-1a
+    ...
+    t+120s  DOWN
+
+    served: 10   failed: 2
+
+  Still drops requests, exactly as predicted in issue #1. The hook cannot
+  help when nothing gets advance warning, because there is no moment to
+  deregister in.
+
+  Closing this case needs retries in whatever calls the service. That is not
+  infrastructure's job and this repo does not pretend to solve it.
+
+WHAT THE LAB CAN NOW CLAIM
+
+  Planned termination: zero visible impact, measured.
+  Sudden failure:      still drops requests during the health check window,
+                       measured, and stated rather than hidden.
+
+  The second number is the one worth keeping. It would have been easy to run
+  only the graceful test, report zero failures, and let a reader assume the
+  platform survives anything. Running both is the difference between a
+  benchmark and a measurement.

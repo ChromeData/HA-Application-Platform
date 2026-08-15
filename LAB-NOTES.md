@@ -132,3 +132,37 @@ run is the one above, which is why it has a failure in it.
 Full output in `findings/chaos-test-real-aws.txt`.
 
 ---
+
+### Session 5: closed the gap I documented, and measured where it stays open
+
+Issue #1 said the failover drops requests for up to 45 seconds, and that no
+health check tuning removes it because the instance dies before the balancer
+finds out.
+
+Fixed it by inverting that order. An autoscaling lifecycle hook on
+`EC2_INSTANCE_TERMINATING` holds the instance in `Terminating:Wait`, which
+triggers deregistration, and the 30 second `deregistration_delay` drains
+in-flight requests before it actually dies.
+
+`default_result = CONTINUE` on purpose. A hook that fails should let the
+instance terminate anyway rather than wedging the autoscaling group, which is
+the failure mode people hit the first time they add one.
+
+**Graceful termination: 14 served, 0 failed.** Gap closed for scale-in,
+deploys, and instance refresh, which is most terminations in a real system.
+
+**Then I tested the case it cannot fix.** `ec2 terminate-instances` directly,
+bypassing the hook, which is what a kernel panic or dead hardware looks like:
+**10 served, 2 failed.**
+
+Still drops, exactly as issue #1 predicted. There is no moment to deregister in
+when nothing gets warning. Covering that needs client side retries, which is
+not infrastructure's job, and this lab does not pretend otherwise.
+
+Running only the graceful test would have produced a clean zero and let a
+reader assume the platform survives anything. Running both is the difference
+between a benchmark and a measurement.
+
+Detail in `findings/graceful-termination-fix.txt`.
+
+---
