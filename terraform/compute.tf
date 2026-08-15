@@ -265,6 +265,39 @@ resource "aws_autoscaling_group" "app" {
   }
 }
 
+# --- closing the failover gap, issue #1 --------------------------------------
+#
+# The chaos test measured 11 requests served and 1 dropped. The cause is
+# ordering: the instance dies, and the load balancer finds out afterwards via
+# health checks. Interval 15s times unhealthy_threshold 3 is up to 45 seconds
+# of traffic sent somewhere already gone, and no combination of those two
+# settings removes it.
+#
+# The fix has to invert the order, so the instance leaves the pool BEFORE it
+# stops serving.
+#
+# A terminate lifecycle hook does that. The instance moves to Terminating:Wait
+# instead of dying, which triggers deregistration from the target group. The
+# deregistration_delay on the target group then drains in-flight requests.
+# Only after that does the instance actually terminate.
+#
+# heartbeat_timeout is 120s against a 30s deregistration delay, so there is
+# room for draining to finish. CONTINUE on timeout means a hook that fails for
+# any reason still lets the instance terminate rather than wedging the
+# autoscaling group, which is the failure mode people hit with hooks.
+#
+# What this does NOT fix: sudden failure. A kernel panic or dead hardware gives
+# no notice, nothing gets to run, and those requests still drop. Covering that
+# needs retries in the client, which is not infrastructure's job.
+resource "aws_autoscaling_lifecycle_hook" "drain_before_terminate" {
+  name                   = "lab13-drain-before-terminate"
+  autoscaling_group_name = aws_autoscaling_group.app.name
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+
+  heartbeat_timeout = 120
+  default_result    = "CONTINUE"
+}
+
 # Scale on CPU. Out at 70 percent, and AWS handles scaling back in on the same
 # target, which avoids the classic mistake of setting the scale-in threshold so
 # close to scale-out that the group oscillates.
