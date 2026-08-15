@@ -166,3 +166,62 @@ between a benchmark and a measurement.
 Detail in `findings/graceful-termination-fix.txt`.
 
 ---
+
+## Session 6: the network became somebody else's module
+
+Lab 12 and this lab both hand-wrote a VPC. Twenty-two near-identical resources
+between them.
+
+The reason to extract it was not tidiness. It was that the copies had already
+drifted: lab 12's verifier caught its default security group wide open on
+egress, and this lab only got the fix because I remembered to carry it across.
+There is no mechanism in a copy-pasted VPC that carries a fix forward, and a
+third lab would have shipped the hole.
+
+So `terraform/network.tf` went from 130 lines to a module call, pinned at
+`v0.1.0` of [terraform-aws-secure-vpc](https://github.com/ChromeData/terraform-aws-secure-vpc).
+
+**Pinned to a tag, not a relative path.** The relative path works while both
+labs sit in one folder and breaks the moment this is its own repository. Worse,
+it means a change to the module reaches every consumer on the next apply with
+no version bump and nothing to review. `?ref=main` has the same defect with
+extra steps. Paying for a tag is the point, not the inconvenience.
+
+**Then the part that would have destroyed the network.**
+
+Terraform tracks resources by address. `aws_vpc.main` and
+`module.vpc.aws_vpc.this` are different addresses, so moving a declaration into
+a module does not read as a refactor. It reads as: delete all of this, create
+all of that. Live, that is the VPC gone, the subnets with it, the instances in
+them, and a new DNS name on the load balancer, for a change that touched no
+behaviour whatsoever.
+
+I did not want to state that from memory and was not going to pay to confirm
+it, so I reproduced it offline with the null provider. Three resources into a
+module, no cloud, no cost:
+
+```
+without moved blocks    Plan: 3 to add, 0 to change, 3 to destroy
+with moved blocks       Plan: 0 to add, 0 to change, 0 to destroy
+```
+
+Nine `moved` blocks went in. Two are not clean one-to-one mappings, and the
+comments in the file say so rather than smoothing it over:
+
+The old config had **one** private route table shared by both AZs; the module
+gives each AZ its own. So the existing table becomes index 0 and index 1 is
+genuinely new. That part of the refactor is not cosmetic. The knock-on is that
+the private association for AZ 1 now points at a different route table, and
+`route_table_id` cannot be updated in place, so that association is replaced.
+On a tier with no routes in it that is a few seconds of nothing, but it belongs
+in the plan review rather than in a surprise.
+
+**Honest scope:** the mechanic is proven, with real state and real plan output.
+Those nine specific blocks are not, because this lab's infrastructure was
+destroyed after the chaos test and there is no live state left to move them
+against. `terraform validate` resolves moved-block addresses, so they are
+checked for correctness, and that is all it is.
+
+Detail in `findings/state-move-proof.txt`.
+
+---

@@ -1,0 +1,131 @@
+MOVING RESOURCES INTO A MODULE WITHOUT DESTROYING THEM
+======================================================
+
+This lab's network was 130 lines of VPC, subnets and route tables. Lab 12 had
+the same 130 lines with different names. Two copies of a pattern is the point
+where an interface is cheaper than a copy, so it was extracted into lab 14,
+terraform-aws-secure-vpc, and this lab became its first consumer.
+
+The refactor is supposed to be cosmetic. Same network, same addresses, same
+everything, just declared through a module instead of inline.
+
+Terraform does not see it that way, and finding that out during an apply on
+something real is a genuinely bad afternoon.
+
+
+-------------------------------------------------------------------------------
+WHY
+-------------------------------------------------------------------------------
+
+Terraform tracks every resource by its address in state. aws_vpc.main and
+module.vpc.aws_vpc.this are two different addresses, so moving the declaration
+into a module reads as: the first one is gone, the second one is new.
+
+On a live environment that means the VPC is destroyed and rebuilt. Which takes
+the subnets with it, and the instances in them, and gives the load balancer a
+new DNS name. For a change that touched no behaviour at all.
+
+
+-------------------------------------------------------------------------------
+MEASURED, NOT ASSUMED
+-------------------------------------------------------------------------------
+
+I did not want to state this from memory and I was not going to spend money
+proving it, so I reproduced it offline with the null provider. Same structural
+change, three resources moved into a module, no cloud and no cost.
+
+Baseline applied at the root:
+
+    $ terraform state list
+    null_resource.main
+    null_resource.sub[0]
+    null_resource.sub[1]
+
+    ids:
+      null_resource.main    = 8593891685457843268
+      null_resource.sub[0]  = 8225916378450247450
+      null_resource.sub[1]  = 994396837925538377
+
+A) declarations moved into a module, nothing else changed:
+
+    # null_resource.main will be destroyed
+    # null_resource.sub[0] will be destroyed
+    # null_resource.sub[1] will be destroyed
+    # module.vpc.null_resource.sub[0] will be created
+    # module.vpc.null_resource.sub[1] will be created
+    # module.vpc.null_resource.this will be created
+
+    Plan: 3 to add, 0 to change, 3 to destroy.
+
+Everything replaced. New ids. On real infrastructure, new IP addresses and a
+new load balancer hostname.
+
+B) identical config, plus moved blocks:
+
+    moved {
+      from = null_resource.main
+      to   = module.vpc.null_resource.this
+    }
+
+    moved {
+      from = null_resource.sub
+      to   = module.vpc.null_resource.sub
+    }
+
+    # null_resource.sub[0] has moved to module.vpc.null_resource.sub[0]
+    # null_resource.sub[1] has moved to module.vpc.null_resource.sub[1]
+    # null_resource.main   has moved to module.vpc.null_resource.this
+
+    Plan: 0 to add, 0 to change, 0 to destroy.
+
+Nothing touched. A moved block tells Terraform the old address and the new one
+are the same object, so it rewrites the state pointer instead of replacing
+anything. Note also that a counted resource moves as a whole; the indices carry
+across without listing them one by one.
+
+
+-------------------------------------------------------------------------------
+WHAT WENT INTO THIS LAB
+-------------------------------------------------------------------------------
+
+Nine moved blocks in terraform/network.tf, covering the VPC, internet gateway,
+both subnet sets, both route tables, both association sets, and the default
+security group.
+
+Two of them are not clean one-to-one moves, and the comments in the file say
+so rather than papering over it:
+
+  aws_route_table.private
+      The old config had ONE private route table shared by both AZs. The module
+      creates one per AZ. So the existing table maps to index 0, and index 1 is
+      genuinely new. This part of the refactor is not cosmetic.
+
+  aws_route_table_association.private
+      Follows from the above. The association for AZ 1 now points at a
+      different route table, and route_table_id cannot be updated in place, so
+      that one association is replaced. On a tier with no routes in it that is
+      a few seconds of nothing, but it belongs in the plan review rather than
+      in a surprise.
+
+  aws_default_security_group.locked
+      Gated on a variable in the module, so it is a counted resource and the
+      address carries an index.
+
+The module also adds a free S3 gateway endpoint by default, which is new and
+costs nothing.
+
+
+-------------------------------------------------------------------------------
+HONEST SCOPE
+-------------------------------------------------------------------------------
+
+The mechanic above is proven. Real terraform, real state, real plan output.
+
+These nine specific blocks are NOT proven, because this lab's infrastructure
+was destroyed after the chaos test and there is no live state left to move
+them against. They are checked for syntax and address correctness by
+terraform validate, which does resolve moved-block addresses, and that is all.
+
+Anyone applying this against a live lab 13 should read the plan before
+approving it. That is the rule regardless of what any file in this repository
+claims.

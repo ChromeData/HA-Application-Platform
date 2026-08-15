@@ -37,7 +37,7 @@ data "aws_ami" "al2023" {
 resource "aws_security_group" "alb" {
   name        = "lab13-alb"
   description = "Load balancer. The only thing the internet can reach."
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = local.vpc_id
   tags        = { Name = "lab13-alb" }
 }
 
@@ -62,7 +62,7 @@ resource "aws_vpc_security_group_egress_rule" "alb_to_app" {
 resource "aws_security_group" "app" {
   name        = "lab13-app"
   description = "Application tier. Reachable only from the load balancer."
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = local.vpc_id
   tags        = { Name = "lab13-app" }
 }
 
@@ -90,7 +90,7 @@ resource "aws_vpc_security_group_egress_rule" "app_to_db" {
 resource "aws_security_group" "db" {
   name        = "lab13-db"
   description = "Data tier. Reachable only from the app tier, on one port."
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = local.vpc_id
   tags        = { Name = "lab13-db" }
 }
 
@@ -116,7 +116,7 @@ resource "aws_lb" "main" {
 
   # Both public subnets. An ALB can only route to targets in AZs where it has a
   # subnet, so giving it one AZ silently halves the design.
-  subnets = aws_subnet.public[*].id
+  subnets = local.public_ids
 
   tags = { Name = "lab13-alb" }
 }
@@ -125,7 +125,7 @@ resource "aws_lb_target_group" "app" {
   name     = "lab13-app-tg"
   port     = 80
   protocol = "HTTP"
-  vpc_id   = aws_vpc.main.id
+  vpc_id   = local.vpc_id
 
   health_check {
     path     = "/"
@@ -238,7 +238,7 @@ resource "aws_launch_template" "app" {
 
 resource "aws_autoscaling_group" "app" {
   name                = "lab13-asg"
-  vpc_zone_identifier = aws_subnet.private[*].id
+  vpc_zone_identifier = local.private_ids
 
   min_size         = 2
   max_size         = 4

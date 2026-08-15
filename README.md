@@ -9,7 +9,7 @@
 | | |
 |---|---|
 | **Domains** | AWS, Terraform, availability engineering |
-| **Built on** | AWS primitives directly. No modules, the point is knowing what each piece does |
+| **Built on** | AWS primitives directly, then the network refactored onto a module I extracted from it |
 | **Cost** | A few cents. ALB and two t3.micro for under an hour, destroyed after |
 | **Status** | Built and broken on real AWS. 11 of 12 requests survived an instance kill (findings/) |
 
@@ -41,9 +41,28 @@ Highly available means automatic recovery without a human. It does not mean zero
 
 <sub>Two failures along the way, both mine. Every instance failed its health check forever because `user_data` ran `dnf install nginx` while the private subnets have no route off the network, by design. The fix was to stop needing the internet rather than add a $32/month NAT gateway. And the first chaos run **passed falsely**: it grabbed `Instances[0]`, which was a stale already terminated entry, killed something dead, and produced exactly the output a successful test produces. Target selection is now its own tested function. Both written up in [LAB-NOTES.md](./LAB-NOTES.md).</sub>
 
+## The network became a module
+
+Every resource here was written out by hand first, on purpose. The value is knowing what a target group health threshold actually does, and you do not learn that by wiring up somebody else's abstraction over it.
+
+But once lab 12 and this lab both had the same hand-written VPC, roughly 22 near-identical resources between them, the copies started to drift. Lab 12's verifier found the default security group wide open; this lab only got that fix because I remembered to carry it across. A third lab would not have.
+
+So the network was extracted into a module, [terraform-aws-secure-vpc](https://github.com/ChromeData/terraform-aws-secure-vpc), and this lab is its first consumer. `terraform/network.tf` went from 130 lines to a module call pinned at `v0.1.0`.
+
+**The refactor is where the actual lesson was.** Moving a resource into a module changes its address in state, and Terraform tracks resources by address, so a cosmetic change reads as *destroy the entire network and rebuild it*. On a live environment that means the subnets gone, the instances with them, and a new DNS name on the load balancer.
+
+I measured it offline with the null provider rather than paying to find out:
+
+```
+without moved blocks    Plan: 3 to add, 0 to change, 3 to destroy
+with moved blocks       Plan: 0 to add, 0 to change, 0 to destroy
+```
+
+Nine `moved` blocks now sit in `network.tf`. Two are not clean one-to-one mappings and the comments say so: the old config shared one private route table across both AZs where the module gives each its own, so one table maps to index 0, index 1 is genuinely new, and the association for the second AZ gets replaced. Written up in [`findings/state-move-proof.txt`](./findings/state-move-proof.txt).
+
 ## What I did not build
 
-AWS provides the primitives. The architecture, the state backend design, the chaos script, and the measurement are mine. No community Terraform module was used on purpose: the value here is knowing what a target group health threshold actually does, not wiring up someone else's abstraction over it.
+AWS provides the primitives. The architecture, the state backend design, the chaos script, the measurement, and the module the network now sits on are mine. No community Terraform module was used.
 
 ## Run it
 
