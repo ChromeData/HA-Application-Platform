@@ -60,6 +60,20 @@ with moved blocks       Plan: 0 to add, 0 to change, 0 to destroy
 
 Nine `moved` blocks now sit in `network.tf`. Two are not clean one-to-one mappings and the comments say so: the old config shared one private route table across both AZs where the module gives each its own, so one table maps to index 0, index 1 is genuinely new, and the association for the second AZ gets replaced. Written up in [`findings/state-move-proof.txt`](./findings/state-move-proof.txt).
 
+## Drift and orphans
+
+State is a ledger, not a mirror. Two ways it stops matching reality: a managed resource gets edited by hand, or a resource gets created that Terraform never knew about. Ten storage accounts in the console, nine in state.
+
+```
+drift, resource edited out of band     Plan: 1 to add, 0 to change, 0 to destroy
+import before the config block exists  Error: resource address does not exist in the configuration
+import block, config present           Plan: 1 to import, 0 to add, 0 to change, 0 to destroy
+```
+
+Three things worth knowing. Drift on a `local_file` plans as **create**, not update, because the provider drops the resource from state when the hash stops matching — the plan verb reports what Terraform intends, not what you intended. Import refuses to run until the resource block already exists, and says so in the error. And import is implemented per resource type, not universally: `random_pet`, `null_resource` and `local_file` all answer `Resource Import Not Implemented`.
+
+Written up in [`findings/drift-and-import-proof.txt`](./findings/drift-and-import-proof.txt).
+
 ## What I did not build
 
 AWS provides the primitives. The architecture, the state backend design, the chaos script, the measurement, and the module the network now sits on are mine. No community Terraform module was used.

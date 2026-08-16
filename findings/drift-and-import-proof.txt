@@ -1,0 +1,231 @@
+ADOPTING RESOURCES TERRAFORM DIDN'T CREATE
+==========================================
+
+The state file is a ledger, not a mirror. It records what Terraform believes it
+manages, and nothing forces reality to agree. Two things break that agreement:
+someone edits a managed resource by hand, or someone creates a resource
+Terraform never knew about.
+
+The first is drift. The second is an orphan. They are not the same problem and
+they do not have the same fix, which is worth knowing before an interview asks
+and definitely worth knowing before production asks.
+
+The scenario this lab reproduces is the common one: there are ten storage
+accounts in the cloud console and nine in state. One was clicked into existence
+during an incident and never went back into code.
+
+
+-------------------------------------------------------------------------------
+MEASURED, NOT ASSUMED
+-------------------------------------------------------------------------------
+
+Same approach as the moved-block work in state-move-proof.txt. Real terraform,
+real state, real command output, reproduced offline so it costs nothing.
+
+Terraform v1.9.8. Providers: hashicorp/local, hashicorp/null, hashicorp/random,
+plus the built-in terraform_data.
+
+
+-------------------------------------------------------------------------------
+A) DRIFT — A MANAGED RESOURCE EDITED OUTSIDE TERRAFORM
+-------------------------------------------------------------------------------
+
+Baseline: a local_file under management, applied clean.
+
+    $ terraform state list
+    local_file.managed
+
+Then the file is edited by hand, the way a tired human edits a config at 2am:
+
+    $ echo "changed by hand, outside terraform" > managed.txt
+
+Plan, with no change to the configuration at all:
+
+    local_file.managed: Refreshing state... [id=4ffefbde25f94c...]
+
+      # local_file.managed will be created
+      + resource "local_file" "managed" {
+          + content  = <<-EOT
+                under management
+            EOT
+          + filename = "./managed.txt"
+        }
+
+    Plan: 1 to add, 0 to change, 0 to destroy.
+
+Note what that says, because it is not what most people expect. Not "1 to
+change". **Created.**
+
+During refresh the provider compared the file on disk against the hash in state,
+decided the thing it was managing no longer exists, and dropped it from state.
+So the plan is not a repair, it is a fresh create that happens to overwrite.
+
+The practical lesson is the one that matters: plan output tells you what
+Terraform intends, not what you intended. A "+ create" on a resource you know
+already exists means state and reality have diverged, and reading the verb
+carelessly is how people destroy things.
+
+
+-------------------------------------------------------------------------------
+B) NOT EVERY RESOURCE CAN BE IMPORTED
+-------------------------------------------------------------------------------
+
+Before the import mechanics, an honest detour, because this cost time.
+
+Import is implemented per resource type by the provider. It is not a universal
+Terraform feature. Three attempts that failed:
+
+    $ terraform import random_pet.orphan my-orphan-pet
+    Error: Resource Import Not Implemented
+
+    $ terraform import null_resource.orphan 1234567890
+    Error: Resource Import Not Implemented
+
+    $ terraform import local_file.orphan ./orphan.txt
+    Error: Resource Import Not Implemented
+
+All three are real providers, all three are current versions, none of them
+implement import for those types. The built-in terraform_data does, and that is
+what the rest of this uses.
+
+Real cloud resources overwhelmingly do support import — aws_s3_bucket,
+azurerm_storage_account, google_compute_instance all do. But "terraform can
+import anything" is false, and the failure mode is a flat refusal rather than
+anything subtle.
+
+
+-------------------------------------------------------------------------------
+C) THE ORDER — IMPORT BEFORE CONFIG
+-------------------------------------------------------------------------------
+
+The question is: what are the actual steps to import? Specifically, does the
+configuration come first, or the command?
+
+Empty directory, provider initialised, no resource block written. Import the
+orphan:
+
+    $ terraform import terraform_data.orphan abc123
+
+    Error: resource address "terraform_data.orphan" does not exist in the
+    configuration.
+
+    Before importing this resource, please create its configuration in the root
+    module. For example:
+
+    resource "terraform_data" "orphan" {
+      # (resource arguments)
+    }
+
+Terraform answers its own question, and the answer is unambiguous.
+
+**Configuration first. Command second.** Import writes a state entry that points
+at a configuration block; if the block is not there, there is nothing to point
+at. It is not a two-way operation and it does not generate code for you.
+
+
+-------------------------------------------------------------------------------
+D) THE ORDER — CONFIG FIRST, THEN IMPORT
+-------------------------------------------------------------------------------
+
+Same directory, resource block added:
+
+    resource "terraform_data" "orphan" {}
+
+    $ terraform import terraform_data.orphan abc123
+    terraform_data.orphan: Refreshing state... [id=abc123]
+
+    Import successful!
+
+    The resources that were imported are shown above. These resources are now
+    in your Terraform state and will henceforth be managed by Terraform.
+
+    $ terraform state list
+    terraform_data.orphan
+
+That is the CLI path, and it is stateful in the bad sense: it mutates state
+immediately, it is not visible in a plan beforehand, and it leaves no record in
+the repository that it happened.
+
+
+-------------------------------------------------------------------------------
+E) THE IMPORT BLOCK — SAME OUTCOME, REVIEWABLE
+-------------------------------------------------------------------------------
+
+Terraform 1.5 added a config-driven form. The import is declared in code rather
+than typed at a terminal:
+
+    resource "terraform_data" "adopted" {}
+
+    import {
+      to = terraform_data.adopted
+      id = "existing-resource-999"
+    }
+
+Plan:
+
+    terraform_data.adopted: Preparing import... [id=existing-resource-999]
+
+      # terraform_data.adopted will be imported
+        resource "terraform_data" "adopted" {
+            id = "existing-resource-999"
+        }
+
+    Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.
+
+Apply:
+
+    terraform_data.adopted: Importing... [id=existing-resource-999]
+    terraform_data.adopted: Import complete [id=existing-resource-999]
+
+    Apply complete! Resources: 1 imported, 0 added, 0 changed, 0 destroyed.
+
+Note "1 to import" as its own verb in the plan summary, alongside add, change
+and destroy.
+
+This is the better path on a team, for the same reason moved blocks beat
+`terraform state mv`: it goes through pull request, it shows up in a plan before
+it touches anything, and the repository ends up recording why a resource that
+predates the code is now in the code. The import block can be deleted after a
+successful apply; the resource block stays.
+
+
+-------------------------------------------------------------------------------
+WHAT TO ACTUALLY SAY
+-------------------------------------------------------------------------------
+
+Ten in the console, nine in state:
+
+  1. Identify the orphan. Console, CLI, or a plan that is trying to create
+     something that already exists.
+  2. Write the resource block first. Import will refuse without it, and the
+     error message says so explicitly.
+  3. Prefer an import block over the CLI, so the adoption is reviewable and
+     recorded.
+  4. Plan. Expect "1 to import" and nothing else. Anything additional means the
+     written config does not match the live resource.
+  5. Reconcile the diff until the plan is clean, then apply.
+  6. Delete the import block. Keep the resource block.
+
+And the part worth saying out loud in an interview: import does not write your
+configuration for you. It attaches an existing object to a block you already
+wrote. Everything you failed to declare is now drift.
+
+
+-------------------------------------------------------------------------------
+HONEST SCOPE
+-------------------------------------------------------------------------------
+
+All command output above is real and was produced against Terraform v1.9.8.
+
+It was produced with terraform_data and local_file, not against AWS or Azure.
+The mechanics of import — ordering, the error, the plan verb, the block syntax —
+are core Terraform behaviour and do not vary by provider. What does vary is
+whether a given resource type implements import at all (section B), and how much
+of a real resource's schema you have to hand-write before the plan comes back
+clean. On a live azurerm_storage_account that reconciliation is the slow part,
+and this lab does not simulate it.
+
+The drift half used local_file specifically because its provider drops the
+resource from state on mismatch, which produces "+ create". A provider that
+refreshes attributes in place would show "~ update" instead. Both are drift;
+the plan verb differs by provider implementation.
